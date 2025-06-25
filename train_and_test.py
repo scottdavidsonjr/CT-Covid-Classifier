@@ -1,7 +1,4 @@
-import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
-
 from torchvision import transforms
 import torchvision.models as models
 from skimage.util import montage
@@ -10,10 +7,8 @@ import cv2
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.models import vgg19_bn
-import numpy as np
-import seaborn as sns
 import random
-import functions as f
+import functions_and_classes as f
 import time
 import subprocess
 import webbrowser
@@ -109,10 +104,10 @@ valset = f.CovidCTDataset(image_files = val_files,
 testset = f.CovidCTDataset(image_files = test_files, 
                           transform= val_transformer)
 
-#  ----------------------------------------- AUGMENTING DATA ----------------------------------------- #
+#  ----------------------------------------- LABELING DATA ----------------------------------------- #
 # Send labels to GPU
 labels = [elem['label'] for elem in trainset]
-labels = torch.tensor(labels)  
+labels = f.torch.tensor(labels)  
 
 ### Account for class imbalances ###
 
@@ -122,9 +117,9 @@ train_covid = len(train_files) - train_non_covid
 class_sample_counts = [train_covid, train_non_covid]
 
 
-############################# THIS IS WHERE I STOPPED - NEED TO UNDERSTAND BELOW CODE ###
-# Get
-weights = 1. / torch.tensor(class_sample_counts, dtype=torch.float)
+#  ----------------------------------------- UPSAMPLING, PREPPING DATA & MODEL ----------------------------------------- #
+# Minority class gets higher weight to encourage model to see non-covid cases (minority class) more often
+weights = 1. / f.torch.tensor(class_sample_counts, dtype=f.torch.float) 
 sample_weights = weights[labels]  # labels is a tensor of your dataset's labels
 sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
 
@@ -134,49 +129,22 @@ test_loader = DataLoader(testset, batch_size=batchsize, drop_last=False, shuffle
 
 ### Resnet18
 model = models.resnet18(weights='DEFAULT')
-model.fc = nn.Linear(model.fc.in_features, 2) # Model fully connected layers
+model.fc = f.nn.Linear(model.fc.in_features, 2) # Model fully connected layers
 model = model.to(f.device)
-
-
-
-# model = models.resnet18(pretrained=True)
-
-# # Replace final layer for binary classification or however many classes you have
-# num_classes = 2  # or however many you need
-# model.fc = nn.Linear(model.fc.in_features)
-
-# model = model.to(f.device)
-
-
-# Did it use CPU because I didn't specify f.device?
-# model = ResNet50(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
-
-# input 4096 features, but output 2 (binary classification)
-# model.to(f.device)
-# Perform transfer learning over our dataset
-    # Transfer learning- take a pre-trained model and show it a related but new task
-    # in order to improve generalization of the model
-        # Transfer as much knowledge as possible from the previous task the model was trained on
-        # to the new task at hand. The model is fine-tuned by keeping the early & middle layers (frozen layers)
-        # but modifying the later layers (modifiable layers)
 
 ### Hyperparameter tuning
 learning_rate = 0.01 # Standard learning rate; don't want convergence to be too fast and overshoot local/absolute minimum for optimization
-# during backpropagation
-    # Learning rate is the size of the incremental step when updating the weights as the model is trained
 optimizer = optim.SGD(model.parameters(), lr = learning_rate, momentum=0.9) # Momentum helps to overcome local minima
-# What is momentum in an optimizer?
-print(learning_rate)
 
 
-### TRAINING THE MODEL ### ------------------------------------------
+
+#  ----------------------------------------- TRAINING MODEL ----------------------------------------- #
 
 # best_model = model
 best_val_score = 99999999999 # Loss instead of accuracy
 
-class_weights = torch.tensor([1.0, 1107 / 433], dtype=torch.float).to(f.device)  # [Covid, Non-Covid]
-criterion = nn.CrossEntropyLoss(weight=class_weights)
-# criterion = nn.CrossEntropyLoss() # This is the loss function, AKA log loss
+class_weights = f.torch.tensor([1.0, 1107 / 433], dtype=f.torch.float).to(f.device)  # [Covid, Non-Covid]
+criterion = f.nn.CrossEntropyLoss(weight=class_weights) # This is the loss function, AKA log loss
 
 early_stopper = f.EarlyStopping(patience = 5) # Set this up for early stopping
 
@@ -190,7 +158,7 @@ for epoch in range(60):
     model.train()
     train_loss=0
     train_correct=0
-    # accum_steps = 2
+
 
     for iter_num, data in enumerate(train_loader): # Data is clumped into batches of 16, since that is what was specified in DataLoader class
  
@@ -202,36 +170,22 @@ for epoch in range(60):
             # Do float to ensure images are float32, not float64
         loss = criterion(output, target)
 
-        # print(next(model.parameters()).device)  # should be mps:0
-
         # Scale loss for accumulation
-        # loss = loss / accum_steps # DON'T DO FOR NOW
-        loss.backward() # Performs backpropagation to compute the gradient of the loss for each parameter
-                        # The gradients are stored in the 'grad' portion of the tensor represented by 'loss'
-        
-        # At the end of every batch, call an optimizer to update the weights using the gradients calculated in loss
-            # Need batch size of 64 or 128, but computer can only handle so much so do 8*8 = 64 to update parameters after each "batch"
-        # if iter_num % 8 == 0:
-        # Try batch size of 32 by using batch logic since 16 can fit on mps GPU
 
-        # if ((iter_num + 1) % accum_steps == 0) or (iter_num + 1 == len(train_loader)): # DON'T DO FOR NOW
+        loss.backward() # Performs backpropagation to compute the gradient of the loss for each parameter
         optimizer.step() # Update model parameters using gradients
         optimizer.zero_grad() # Clear gradients from previous step
 
-        
         # Log loss, scale back up to original scale
-        train_loss += loss.item() # * accum_steps # loss.item() extracts scalar value from single-element tensor 
-                                    # Add onto it to determine performance for each batch?
+        train_loss += loss.item()
         
-        torch.mps.synchronize() # Force sync to help GPU activity show up 
+        f.torch.mps.synchronize() # Force sync to help GPU activity show up 
         # Calculate the number of correctly classified examples
         pred = output.argmax(dim=1, keepdim=True) # Prediction for each image
         train_correct += pred.eq(target.view_as(pred)).sum().item() # Number predicted correctly
-        # print('Ok')
         
 
     # Compute & print performance metrics:
-
     print("Val files:", len(val_files))
 
     metrics_dict = f.compute_metrics(model, val_loader)
@@ -248,7 +202,7 @@ for epoch in range(60):
     
     # Save model with best validation accuracy
     if metrics_dict['Validation Loss'] < best_val_score:
-        torch.save(model, "best_model_Resnet.pkl") # torch is imported in f, so utilize f module
+        f.torch.save(model, "best_model_Resnet.pkl") # torch is imported in f, so utilize f module
             # Above saves serialized model (serialized means converting object into series of bytes that is saved in an easily transmittable state)
             # Pickle module- implements binary protocols for serializing and unserializing data easily
         best_val_score = metrics_dict['Validation Loss']
@@ -265,27 +219,15 @@ for epoch in range(60):
     writer.add_scalars( "Accuracies", {"Train Accuracy": 100.0 * train_correct / len(train_loader.dataset),
                                        "Valid Accuracy": 100.0 * metrics_dict["Accuracy"]}, epoch)
 
-    # Run the following in a terminal: tensorboard --logdir=your_log_dir
-
-    # Add data to the EarlyStopper object
-    # early_stopper.add_data(model, metrics_dict['Validation Loss'], metrics_dict['Accuracy'])
-
-    # early_stopper.add_data(metrics_dict['Validation Loss'])
-
-    # If both accuracy and loss are not improving, stop the training
-    # if early_stopper.stop() == True:
-    #     break
-    
-    # # if only loss is not improving, lower the learning rate
-    # if early_stopper.stop() == 3:
-    #     for param_group in optimizer.param_groups:
-    #         learning_rate *= 0.1
-    #         param_group['lr'] = learning_rate
-    #         print('Updating the learning rate to {}'.format(learning_rate))
-    #         early_stopper.reset()
+    if early_stopper.stop() == 3:
+        for param_group in optimizer.param_groups:
+            learning_rate *= 0.1
+            param_group['lr'] = learning_rate
+            print('Updating the learning rate to {}'.format(learning_rate))
+            early_stopper.reset()
 
 
-# Wouldn't we want the writer out the loop so it can continue to add to tensorboard?
+
 writer.close()
 
 
@@ -306,21 +248,5 @@ print("Sensitivity \t {:.3f}".format(metrics_dict['Sensitivity']))
 print("Specificity \t {:.3f}".format(metrics_dict['Specificity']))
 print("Area Under ROC \t {:.3f}".format(metrics_dict['Roc_score']))
 print("------------------------------------------------------------------------------")
-
-
-
-
-
-### TO CHECK GPU USAGE ###
-# sudo powermetrics | grep -i gpu
-
-
-### BOTTOM-UP:
-    # Ensure there is no data leakage
-    # Ensure data quality is good and labels are proper
-    # Ensure labels are correct in actual data processing
-    # Ensure augmentations don' mess anything up or cause issues
-
-    # Everything else is training specific- batch size, learning rate, model type, etc.
 
 
